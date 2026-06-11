@@ -92,39 +92,50 @@ export function createTokenManager(config: GuestyClientConfig) {
   }
 
   async function mint(): Promise<string> {
-    const res = await fetch(tokenUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "client_credentials",
-        client_id: config.clientId,
-        client_secret: config.clientSecret,
-        scope: "open-api",
-      }),
-      cache: "no-store",
-    });
-    if (!res.ok) {
-      throw new Error(`Guesty token request failed: ${res.status}`);
-    }
-    const data = (await res.json()) as OAuthResponse;
-    const token = data.access_token;
-    if (!token) throw new Error("Guesty token response missing access_token");
+    // Retry on 429 (Guesty's mint endpoint is rate-limited at 5/day; a transient
+    // 429 under contention should back off, not hard-fail).
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const res = await fetch(tokenUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "client_credentials",
+          client_id: config.clientId,
+          client_secret: config.clientSecret,
+          scope: "open-api",
+        }),
+        cache: "no-store",
+      });
 
-    // Use the REAL expires_in (minus a safety margin) for the in-memory TTL;
-    // fall back to 1h if Guesty omits it.
-    const ttlMs =
-      typeof data.expires_in === "number" && data.expires_in > 0
-        ? data.expires_in * 1000 - SAFETY_MARGIN_MS
-        : DEFAULT_TTL_MS;
-    memory = { token, expires: Date.now() + Math.max(0, ttlMs) };
-    if (redis) {
-      try {
-        await redis.set(redisKey, token, { ex: REDIS_TTL_SEC });
-      } catch {
-        /* in-memory copy still serves this process */
+      if (res.status === 429 && attempt < 2) {
+        await sleep(Math.min(2 ** attempt * 5000, 30_000));
+        continue;
       }
+      if (!res.ok) {
+        throw new Error(`Guesty token request failed: ${res.status}`);
+      }
+
+      const data = (await res.json()) as OAuthResponse;
+      const token = data.access_token;
+      if (!token) throw new Error("Guesty token response missing access_token");
+
+      // Use the REAL expires_in (minus a safety margin) for the in-memory TTL;
+      // fall back to 1h if Guesty omits it.
+      const ttlMs =
+        typeof data.expires_in === "number" && data.expires_in > 0
+          ? data.expires_in * 1000 - SAFETY_MARGIN_MS
+          : DEFAULT_TTL_MS;
+      memory = { token, expires: Date.now() + Math.max(0, ttlMs) };
+      if (redis) {
+        try {
+          await redis.set(redisKey, token, { ex: REDIS_TTL_SEC });
+        } catch {
+          /* in-memory copy still serves this process */
+        }
+      }
+      return token;
     }
-    return token;
+    throw new Error("Guesty token request rate-limited (429) after 3 attempts");
   }
 
   async function getAccessToken(): Promise<string> {
