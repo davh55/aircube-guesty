@@ -8,16 +8,6 @@ const DEFAULT_TTL_MS = 3_600_000; // 1h fallback if expires_in is missing
 const SAFETY_MARGIN_MS = 60_000; // refresh 60s before the real expiry
 const LOCK_POLL_TRIES = 5;
 const LOCK_POLL_DELAY_MS = 400;
-function toRedis(redis) {
-    if (!redis)
-        return null;
-    if (redis instanceof Redis)
-        return redis;
-    if (typeof redis === "object" && "url" in redis && "token" in redis) {
-        return new Redis({ url: redis.url, token: redis.token });
-    }
-    return null;
-}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /**
  * Build a token manager bound to one app's config. Each app constructs this with
@@ -28,10 +18,40 @@ export function createTokenManager(config) {
     const tokenUrl = config.tokenUrl ?? DEFAULT_TOKEN_URL;
     const redisKey = config.redisKey ?? "guesty:token";
     const lockKey = config.lockKey ?? "guesty:token:lock";
-    const redis = toRedis(config.redis);
+    // Redis is built LAZILY (never at import/module-init): constructing
+    // @upstash/redis eagerly throws on a malformed URL, which would crash a Next
+    // build that merely imports this module. Built once on first use, defensively
+    // (trim whitespace/newlines from env values, swallow construction errors →
+    // degrade to no-Redis rather than throw).
+    let redisResolved = false;
+    let redisClient = null;
+    function getRedis() {
+        if (redisResolved)
+            return redisClient;
+        redisResolved = true;
+        const r = config.redis;
+        try {
+            if (!r) {
+                redisClient = null;
+            }
+            else if (r instanceof Redis) {
+                redisClient = r;
+            }
+            else if (typeof r === "object" && "url" in r && "token" in r) {
+                const url = String(r.url ?? "").trim();
+                const token = String(r.token ?? "").trim();
+                redisClient = url && token ? new Redis({ url, token }) : null;
+            }
+        }
+        catch {
+            redisClient = null;
+        }
+        return redisClient;
+    }
     // Per-instance in-memory cache: avoids a Redis round-trip on hot paths.
     let memory = null;
     async function readCache() {
+        const redis = getRedis();
         if (!redis)
             return null;
         try {
@@ -44,6 +64,7 @@ export function createTokenManager(config) {
     }
     /** Fail-CLOSED: missing/unreachable Redis returns false (do NOT mint blindly). */
     async function acquireLock() {
+        const redis = getRedis();
         if (!redis)
             return false;
         try {
@@ -55,6 +76,7 @@ export function createTokenManager(config) {
         }
     }
     async function releaseLock() {
+        const redis = getRedis();
         if (!redis)
             return;
         try {
@@ -96,6 +118,7 @@ export function createTokenManager(config) {
                 ? data.expires_in * 1000 - SAFETY_MARGIN_MS
                 : DEFAULT_TTL_MS;
             memory = { token, expires: Date.now() + Math.max(0, ttlMs) };
+            const redis = getRedis();
             if (redis) {
                 try {
                     await redis.set(redisKey, token, { ex: REDIS_TTL_SEC });
@@ -122,7 +145,7 @@ export function createTokenManager(config) {
             return cached;
         }
         // 4. No Redis at all → can't coordinate, mint directly (single-process/dev).
-        if (!redis)
+        if (!getRedis())
             return mint();
         // 5. Distributed lock so only ONE process mints (protects the 5/day quota).
         const locked = await acquireLock();
@@ -156,6 +179,7 @@ export function createTokenManager(config) {
     /** Drop the cached token (in-memory + Redis) after a 401, so the next call mints. */
     async function invalidate() {
         memory = null;
+        const redis = getRedis();
         if (redis) {
             try {
                 await redis.del(redisKey);
