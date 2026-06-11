@@ -1,0 +1,29 @@
+{
+  "name": "@aircube/guesty",
+  "version": "0.1.0",
+  "description": "Canonical Guesty Open API client for Aircube: shared OAuth token manager (Redis cache + distributed lock) and authenticated fetch. Kills the guesty.ts drift across the Aircube apps.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc"
+  },
+  "dependencies": {
+    "@upstash/redis": "^1.34.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}
