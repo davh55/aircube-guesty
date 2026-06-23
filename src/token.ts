@@ -153,6 +153,17 @@ export function createTokenManager(config: GuestyClientConfig) {
         } catch {
           /* in-memory copy still serves this process */
         }
+        // Observability: count mints/day in a SHARED key (every Aircube app +
+        // aircube-web's own client increment the same key), so approaching
+        // Guesty's ~5/day cap is visible to a monitor cron. Best-effort — never
+        // blocks token issuance. Self-expires after 2 days.
+        try {
+          const k = `guesty:mint:${new Date().toISOString().slice(0, 10)}`;
+          await redis.incr(k);
+          await redis.expire(k, 172_800);
+        } catch {
+          /* counting is best-effort */
+        }
       }
       return token;
     }
